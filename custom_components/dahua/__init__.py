@@ -788,7 +788,23 @@ class DahuaHostEventStream:
             # configured must stay silent.
             if event.get("Code") == "AlarmLocal" and len(self._by_channel) == 1:
                 for coordinator in next(iter(self._by_channel.values())):
-                    coordinator.handle_event(dict(event))
+                    try:
+                        coordinator.handle_event(dict(event))
+                    except Exception:  # pylint: disable=broad-except
+                        # stream_events wraps on_receive in try/finally with no
+                        # handler, so an exception raised here leaves the read
+                        # loop and silences every camera on the host until the
+                        # backoff reconnects (#475). #706 guards the dispatch
+                        # further down for that reason; this branch bypasses it.
+                        #
+                        # The index is deliberately not logged as a channel:
+                        # for AlarmLocal it is the alarm input, which is the
+                        # whole reason this branch exists.
+                        _LOGGER.warning(
+                            "Unhandled error while handling a %s event from %s; "
+                            "the event is dropped and the stream continues",
+                            event.get("Code", "?"), self._address, exc_info=True,
+                        )
                 continue
 
             # A channel nobody has configured stays silent, exactly as it did

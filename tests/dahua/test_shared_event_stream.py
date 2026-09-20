@@ -226,6 +226,32 @@ async def test_alarmlocal_reaches_both_entries_sharing_the_lone_channel(hass):
     assert len(a.handled) == 1 and len(b.handled) == 1
 
 
+class _ExplodingCoordinator(_Coordinator):
+    """A handler that raises, as a malformed payload can make one do."""
+
+    def handle_event(self, event):
+        self.handled.append(event)
+        raise AttributeError("'str' object has no attribute 'get'")
+
+
+async def test_a_failing_alarmlocal_handler_does_not_end_the_stream(hass):
+    """stream_events wraps its on_receive call in try/finally with no handler.
+
+    So anything raised while handling an event leaves the read loop -- and the
+    stream is per host, so that silences every camera on the device until the
+    backoff reconnects. On current main the dispatch below is guarded for that
+    reason (#706); this branch reaches handle_event without passing through it.
+    """
+    stream = _host_stream(hass, ADDRESS)
+    boom = _ExplodingCoordinator(0, ["AlarmLocal"])
+    stream.register(boom)
+    await _settle()
+
+    stream.on_receive(ALARM_CH1, 0)     # must not raise
+
+    assert len(boom.handled) == 1, "the event still reached the handler"
+
+
 async def test_a_non_alarmlocal_event_still_respects_the_lone_channel(hass):
     """The AlarmLocal early return must not widen what any other code does,
     even on a host with only one channel configured."""
