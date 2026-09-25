@@ -1725,22 +1725,27 @@ class DahuaDataUpdateCoordinator(DataUpdateCoordinator):
                     pass
                 _LOGGER.debug("Device supports Lighting_V2=%s", self._supports_lighting_v2)
 
-                # IPC-Color4M-TZ accepts ordinary Lighting_V2 writes but its
-                # physical white emitter also requires LightingScheme. Probe
-                # that second capability before exposing the entity.
-                if self.model.upper().startswith("IPC-COLOR4M-TZ"):
-                    try:
-                        scheme = await self.client.async_get_lighting_scheme()
-                        self._supports_lighting_scheme_illuminator = any(
-                            key.endswith(".LightingMode") for key in scheme
-                        )
-                    except (ClientError, TimeoutError, ConnectionError,
-                            ValueError, KeyError, TypeError):
-                        self._supports_lighting_scheme_illuminator = False
-                    _LOGGER.debug(
-                        "Device supports LightingScheme illuminator=%s",
-                        self._supports_lighting_scheme_illuminator,
+                # Some cameras accept ordinary Lighting_V2 writes and still
+                # need LightingScheme before the physical white emitter comes
+                # on. The IPC-Color4M-TZ is the model this was written for, but
+                # the probe inside that gate is a real capability check, so it
+                # can answer for any device -- which is what #570 needs, where
+                # a DH-IPC-HDW3849H-AS-PV-PRO satisfies the check and never
+                # matches the name. Asked of everything now; a device without
+                # the table refuses the read, and a recorder 400s, which is
+                # normal rather than a fault.
+                try:
+                    scheme = await self.client.async_get_lighting_scheme()
+                    self._supports_lighting_scheme_illuminator = any(
+                        key.endswith(".LightingMode") for key in scheme
                     )
+                except (ClientError, TimeoutError, ConnectionError,
+                        ValueError, KeyError, TypeError):
+                    self._supports_lighting_scheme_illuminator = False
+                _LOGGER.debug(
+                    "Device supports LightingScheme illuminator=%s",
+                    self._supports_lighting_scheme_illuminator,
+                )
 
                 # Checking privacy mode (LeLensMask) support. This is RPC2 only and many models lack it.
                 # Deliberately broader than PROBE_FAILED: a camera without LeLensMask answers with an
@@ -2385,16 +2390,25 @@ class DahuaDataUpdateCoordinator(DataUpdateCoordinator):
         Returns true if this camera has an illuminator (white light for color cameras).  For example, the
         IPC-HDW3849HP-AS-PV does
         """
+        # The device reports both halves: a LightingScheme table, and a
+        # Lighting_V2 row whose LightType is the white emitter. Asked of every
+        # model rather than only IPC-Color4M-TZ (#570). Additive: a device that
+        # does not report both falls through to exactly the checks it had.
+        scheme_route = getattr(self, "_supports_lighting_scheme_illuminator", False) and any(
+            self.data.get(
+                "table.Lighting_V2[{0}][{1}][{2}].LightType".format(
+                    self._channel, profile, index
+                )
+            ) == WHITE_LIGHT
+            for profile in range(9)
+            for index in range(MAX_LIGHTING_V2_LIGHTS)
+        )
+        if scheme_route:
+            return True
         if self.model.upper().startswith("IPC-COLOR4M-TZ"):
-            return self._supports_lighting_scheme_illuminator and any(
-                self.data.get(
-                    "table.Lighting_V2[{0}][{1}][{2}].LightType".format(
-                        self._channel, profile, index
-                    )
-                ) == WHITE_LIGHT
-                for profile in range(9)
-                for index in range(MAX_LIGHTING_V2_LIGHTS)
-            )
+            # Unchanged for this model: the scheme route is the only one that
+            # lights its emitter, so without it there is nothing to expose.
+            return False
         if self.is_amcrest_doorbell() or self.is_flood_light():
             return False
         if "table.Lighting_V2[{0}][0][0].Mode".format(
