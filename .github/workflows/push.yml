@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - probe/cov3
 
 jobs:
   validate:
@@ -52,6 +53,7 @@ jobs:
             --durations=10 \
             -n auto \
             --cov custom_components.dahua \
+            --cov-report=term-missing \
             -o console_output_style=count \
             -p no:sugar \
             tests
