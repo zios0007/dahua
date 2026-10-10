@@ -28,6 +28,7 @@ Pure `ast`, like the entity-name guards, so it runs without Home Assistant.
 """
 
 import ast
+import functools
 import io
 import pathlib
 
@@ -38,6 +39,55 @@ PACKAGE = pathlib.Path(__file__).resolve().parents[2] / "custom_components" / "d
 # on purpose, because a refusal arrives in more shapes than one (an HTTP
 # status, an Rpc2MethodRefused, a device returning a body that will not parse).
 CATCHES_A_REFUSAL = ("ClientResponseError", "Exception", "ClientError", "bare")
+
+
+@functools.lru_cache(maxsize=1)
+def _exception_aliases() -> dict:
+    """Module-level tuples of exception classes, by name.
+
+    `except PROBE_FAILED` is `except (ClientError, TimeoutError)`, and judging a
+    handler by the text of its type read that as catching nothing. It cost a
+    false positive against somebody else's pull request (#997), whose wrapper
+    was perfectly adequate -- and a guard that cries wolf is one somebody
+    eventually silences, which is worse than not having it.
+
+    Read from the source rather than listed, the same rule the rest of this
+    file follows.
+    """
+    aliases = {}
+    for module in ("coordinator.py", "client.py"):
+        for node in _tree(module).body:
+            if not isinstance(node, ast.Assign) or not isinstance(
+                node.value, (ast.Tuple, ast.List)
+            ):
+                continue
+            members = [
+                ast.unparse(element)
+                for element in node.value.elts
+                if isinstance(element, (ast.Name, ast.Attribute))
+            ]
+            if not members:
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id.isupper():
+                    aliases[target.id] = members
+    return aliases
+
+
+def _handler_names(handler) -> list:
+    """The exception names one `except` clause catches, aliases expanded."""
+    if handler.type is None:
+        return ["bare"]
+    raw = []
+    node = handler.type
+    if isinstance(node, ast.Tuple):
+        raw = [ast.unparse(e) for e in node.elts]
+    else:
+        raw = [ast.unparse(node)]
+    out = []
+    for name in raw:
+        out.extend(_exception_aliases().get(name.split(".")[-1], [name]))
+    return out
 
 
 def _tree(name):
@@ -77,13 +127,22 @@ def _handles_a_refusal(node) -> bool:
         if not isinstance(inner, ast.Try):
             continue
         for handler in inner.handlers:
-            kind = ast.unparse(handler.type) if handler.type else "bare"
-            if not any(name in kind for name in CATCHES_A_REFUSAL):
+            caught = " ".join(_handler_names(handler))
+            if not any(name in caught for name in CATCHES_A_REFUSAL):
                 continue
-            absorbs = any(
-                isinstance(stmt, (ast.Return, ast.Pass)) for stmt in ast.walk(handler)
+            # Absorbing is "does not re-raise", not "returns". A handler that
+            # assigns a fallback and falls through to the code after the try
+            # absorbs just as completely as one that returns -- #997's wrapper
+            # does exactly that, and the first version of this rule read it as
+            # unguarded. A `raise` with no `return` anywhere is the log-and-
+            # re-raise shape in client._request, which does not absorb; a
+            # handler with both is conditional, like async_get_config_lighting
+            # returning {} for a 400 and re-raising anything else.
+            raises = any(isinstance(s, ast.Raise) for s in ast.walk(handler))
+            returns = any(
+                isinstance(s, (ast.Return, ast.Pass)) for s in ast.walk(handler)
             )
-            if absorbs:
+            if returns or not raises:
                 return True
     return False
 
