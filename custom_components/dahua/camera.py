@@ -943,6 +943,14 @@ class DahuaCamera(DahuaBaseEntity, Camera):
         allowlist Home Assistant puts on every other path an integration
         writes to. Without one it just returns, which is what Developer Tools
         shows.
+
+        **It covers the whole device, not one channel.** `getConfig` reads a
+        whole table and most of these have no per-channel form, so running this
+        against one channel of a recorder returns every channel's values --
+        measured as 390 VideoColor keys across twelve channels on a
+        DHI-NVR5464-16P-EI. That makes one call per device enough, and it makes
+        the channel the call was made from almost irrelevant, which is why the
+        answer says so rather than labelling itself with that channel.
         """
         tables: dict = {}
         refused: list = []
@@ -959,8 +967,24 @@ class DahuaCamera(DahuaBaseEntity, Camera):
                 "name": self._coordinator.get_device_name(),
                 "model": self._coordinator.get_model(),
                 "firmware": self._coordinator.get_firmware_version(),
-                "channel": self._coordinator.get_channel(),
+                # The channel this was *run from*, which is not the channel the
+                # backup is of -- see `covers` below. Named as such because the
+                # first version called it "channel" beside a table holding
+                # every channel on the recorder, and that reads as a per
+                # channel backup to anybody restoring from it.
+                "read_from_channel": self._coordinator.get_channel(),
             },
+            # Measured on a DHI-NVR5464-16P-EI the day this shipped: running
+            # this against one channel returned VideoColor carrying all twelve
+            # of the recorder's channels, 390 keys. getConfig reads a whole
+            # table; there is no per-channel form of most of these. So the
+            # backup is of the device, and saying so is the difference between
+            # a useful record and a misleading one.
+            "covers": (
+                "every channel of this device. These are whole-table reads, so "
+                "a table here holds the values for all channels, not only the "
+                "one this was run from."
+            ),
             "tables": tables,
             # Named, not omitted. See the docstring.
             "refused": refused,

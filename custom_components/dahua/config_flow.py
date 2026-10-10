@@ -942,11 +942,24 @@ class DahuaFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 "count": str(len(self._found_channels)),
                 # A whole sentence or nothing, the same rule the repair cards
                 # follow, so the form reads correctly either way.
+                # Says what is skipped and what the user can still do, which
+                # the first version got wrong by saying the channel "cannot be
+                # driven". #710 decided the opposite on purpose: it warns at
+                # setup and still creates the camera entity, because events for
+                # such a channel arrive on the host event stream regardless.
+                # And @JimGermany reports the RTSP stream working through his
+                # NVR2108-I for exactly such a channel, where the measurement
+                # behind #710 (on a DHI-NVR5464-16P-EI) had it timing out. Both
+                # were measured; they are different recorders. So the honest
+                # note is that the config reads will not work, the stream may,
+                # and adding it by hand is allowed.
                 "skipped_note": (
                     (
-                        "Channel %s is reached over ONVIF, so it is not listed: "
-                        "the recorder does not serve it on its own Dahua paths "
-                        "and this integration cannot drive it."
+                        "Channel %s is reached over ONVIF, so it is not offered "
+                        "here: the recorder does not serve its settings on the "
+                        "Dahua paths this integration uses. You can still add it "
+                        "by hand if you want to try -- on some recorders the "
+                        "video stream works even though the settings do not."
                         % ", ".join(str(index + 1) for index in self._onvif_channels)
                     )
                     if self._onvif_channels
