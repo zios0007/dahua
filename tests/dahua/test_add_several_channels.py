@@ -346,6 +346,13 @@ async def test_an_onvif_channel_is_named_rather_than_just_missing():
     note = result["description_placeholders"]["skipped_note"]
     assert "Channel 6" in note, "named by recorder channel number, not index"
     assert "ONVIF" in note
+    # And says what the user can still do. The first version of this note said
+    # the integration "cannot drive" the channel, which contradicts #710: that
+    # PR warns at setup and deliberately still creates the camera entity, and
+    # @JimGermany reports the stream working through his recorder for such a
+    # channel. Telling somebody a thing is impossible when the integration
+    # allows it is the worse error of the two.
+    assert "by hand" in note, "the note must not imply the channel is unusable"
 
 
 async def test_nothing_skipped_means_no_sentence():

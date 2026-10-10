@@ -208,6 +208,10 @@ backup_config:
     device keeps no history of its own. This only reads: it cannot restore by
     itself, and it cannot change the device. Returns the backup, and with a
     filename also writes it as JSON.
+
+    Covers the whole device rather than one channel: these are whole-table
+    reads, so on a recorder one call records every channel. Which camera you
+    target only decides which device is read.
   target:
     entity:
       integration: dahua

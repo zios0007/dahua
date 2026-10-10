@@ -119,8 +119,27 @@ async def test_it_says_which_device_and_when():
 
     assert backup["device"]["model"] == "IPC-HDW1234"
     assert backup["device"]["firmware"] == "2.800.0000016.0.R"
-    assert backup["device"]["channel"] == 0
+    assert backup["device"]["read_from_channel"] == 0
     assert backup["created"]
+
+
+async def test_it_says_the_backup_is_of_the_device_not_the_channel():
+    """Found by running this against a real recorder on the day it shipped.
+
+    One channel's backup came back carrying all twelve channels' VideoColor,
+    390 keys, because getConfig reads a whole table and most of these have no
+    per-channel form. The answer called itself `channel: 2` beside that, which
+    reads as a per-channel backup to anybody restoring from it.
+    """
+    camera = _camera()
+
+    backup = await camera.async_backup_config()
+
+    assert "channel" not in backup["device"], (
+        "a field called `channel` beside whole-device tables is the thing "
+        "that misleads"
+    )
+    assert "every channel" in backup["covers"]
 
 
 async def test_the_backup_carries_no_credential():
