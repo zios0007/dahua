@@ -491,6 +491,24 @@ What this integration cannot do, as distinct from the bugs and firmware quirks u
 
   If the stream error is `Operation timed out` rather than a demuxing failure, that is a different problem: the device is not answering RTSP at all, which points at the RTSP port or at how many simultaneous streams it allows. Recorders in particular cap that quite low.
 
+* **Home Assistant may offer to set up "Imou" for your Dahua device. That card is
+  not from this integration, and it will not work.** Home Assistant 2026.10 added a
+  core `Imou` integration which, like this one, discovers devices by MAC address
+  prefix. Imou is Dahua's consumer brand and the two share OUIs, so a Dahua
+  doorbell, recorder or indoor monitor matches both and can raise two discovery
+  cards.
+
+  Measured here: `3C:EF:8C` covers a VTO2000A doorbell and two VTH5221D indoor
+  monitors, and `30:DD:AA` a DHI-NVR5464 recorder. The core integration claims
+  `3CEF8C*` among eleven prefixes; this one claims `3CEF8C*` and `30DDAA*`.
+
+  Nothing is wrong with your device and nothing is misconfigured. Dismiss the Imou
+  card and use this integration's. There is no fix available to either side, because
+  a MAC prefix cannot tell you which brand sells the hardware. The reverse also
+  happens: a genuine Imou device may be offered this integration, and whether that
+  works depends on whether its firmware still serves the local API — see
+  [If it will not connect](#if-it-will-not-connect).
+
 * IPC-D2B20-ZS doesn't work. Needs a [wrapper](https://gist.github.com/gxfxyz/48072a72be3a169bc43549e676713201), [7](https://github.com/bp2008/DahuaSunriseSunset/issues/7#issuecomment-829513144), [8](https://github.com/mcw0/Tools/issues/8#issuecomment-830669237)
 * **Versions between 0.9.84 and 0.9.92 could leave the illuminator switched on in a profile you are not using.** In that window the illuminator wrote to the wrong day/night profile on some cameras ([#605](https://github.com/rroller/dahua/issues/605), [#582](https://github.com/rroller/dahua/issues/582)); which versions affected you depends on the camera, and 0.9.93 fixed the write for both kinds. It does not undo what the earlier versions wrote. If you turned the illuminator on during that window, `Lighting_V2[<channel>][0][0].Mode` may still be `Manual` on the Day profile.
 
