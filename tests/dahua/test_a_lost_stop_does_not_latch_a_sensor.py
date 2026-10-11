@@ -64,7 +64,14 @@ class _Client:
 def _stream(coordinators, answers, learned=None):
     stream = object.__new__(DahuaHostEventStream)
     stream._address = "10.0.0.1"
-    stream.coordinators = list(coordinators)
+    # `coordinators` is a read-only property over _by_channel, so the fake has
+    # to populate what the property reads rather than assign the property. The
+    # scratch harness I wrote this against used a plain object and assigned it
+    # happily, which is exactly how a fake drifts from the thing it stands in
+    # for.
+    stream._by_channel = {
+        coordinator._channel: [coordinator] for coordinator in coordinators
+    }
     stream._owner = SimpleNamespace(client=_Client(answers))
     stream.dispatched = []
     stream._dispatch_events = lambda data, video_motion_source=None: (
