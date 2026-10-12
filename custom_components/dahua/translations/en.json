@@ -41,10 +41,12 @@
                 "title": "Name this camera",
                 "description": "Give it a name you will recognise in your dashboards and automations. If this is not the camera you meant to add, close this dialog and start again with a different channel number.\n\n{preview}",
                 "data": {
-                    "name": "Device Name"
+                    "name": "Device Name",
+                    "labels": "Labels"
                 },
                 "data_description": {
-                    "name": "Used for the device and as the prefix for every entity it creates."
+                    "name": "Used for the device and as the prefix for every entity it creates.",
+                    "labels": "Put on every device this adds, including each channel of a recorder. Change it later under Configure, where unticking a label removes it again. A label you add to a camera yourself is left alone."
                 }
             },
             "reauth_confirm": {
@@ -116,7 +118,8 @@
                     "disable_backchannel": "Don't open the two-way audio channel when streaming (fixes a doorbell stuck in a call, or talkback in the Dahua/Amcrest app; disables talking from Home Assistant)",
                     "authorized_plates": "Authorized license plates (comma-separated, e.g. ABC1234, XYZ5678)",
                     "authorized_hold_time": "Authorized vehicle hold time (seconds to remain ON)",
-                    "area": "Area (moves this device to it)"
+                    "area": "Area (moves this device to it)",
+                    "labels": "Labels (applied to every camera on this device)"
                 },
                 "data_description": {
                     "manual_siren": "Enable this if your camera has a working siren, but the integration did not create the Siren entity.",
@@ -496,6 +499,10 @@
         "removal_broke_things": {
             "title": "{dependents} referenced the Dahua entry you removed",
             "description": "You removed **{removed}**, and {dependents} referred to entities it provided:\n\n{names}\n\nThose entities no longer exist, so anything using them stops working quietly rather than reporting an error. Worth checking each one.\n\nThis is only a notice -- dismiss it once you have looked."
+        },
+        "webrtc_cannot_play": {
+            "title": "Dahua device at {address} sends video Home Assistant cannot play",
+            "description": "On the Dahua device at {address}, {count} channel(s) send their main stream as H.265 with no audio track: channel {channels}. A browser cannot be given that combination, so the live view for those channels fails rather than showing a still image.\n\nNeither half is a fault on its own, which is why this is not raised for H.265 alone. A browser cannot decode H.265 over WebRTC, so Home Assistant falls back to converting the stream, and the converter asks the camera for an audio track it does not have.\n\nIf you only ever view the sub stream of those channels you may never meet this.\n\n**The fix is on the device, not here.** In the camera or recorder's own web interface, under Video > Encode for each channel listed, set the main stream's compression to H.264. Measured on a DHI-NVR5464-16P-EI: that alone turned a failing live view into a working one, with nothing else changed and no loss of resolution or frame rate. Enabling audio instead clears the missing track and leaves the browser still unable to decode the video.\n\nH.264 at a bitrate chosen for H.265 is a slightly softer picture, so raising the bitrate for that stream is worth considering.\n\nThis message disappears on its own once the device reports streams Home Assistant can play."
         },
         "device_unreachable": {
             "title": "Dahua device at {address} is not responding",

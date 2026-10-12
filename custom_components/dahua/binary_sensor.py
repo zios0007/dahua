@@ -167,8 +167,40 @@ DEVICE_CLASS_OVERRIDES = {
 PARALLEL_UPDATES = 0
 
 
+def _disk_reporter(coordinators: list):
+    """The one coordinator that carries the recorder's disk sensors.
+
+    `storageDevice.cgi?action=getDeviceAllInfo` takes no channel: the disks
+    belong to the box. A recorder is one entry with a coordinator per channel
+    (#827) and every one of them answered this question, so a twelve channel
+    recorder with four bays grew forty eight entities describing four disks, and
+    filed the recorder's bays under devices named after cameras.
+
+    The lowest channel carries them now, the same arrangement the processor and
+    memory sensors use. Returns None for anything that reports no disks, which
+    is every camera.
+    """
+    answering = [c for c in coordinators if c.get_storage_disks()]
+    if not answering:
+        return None
+    return min(answering, key=lambda c: c.get_channel())
+
+
 async def async_setup_entry(hass: HomeAssistant, entry, async_add_devices):
     """Setup binary_sensor platform."""
+    # Once for the device, before the per-channel loop. Disabled by default:
+    # diagnostic, and the read that feeds it is a login the device logs, so only
+    # someone who enables it pays for the refresh (#745).
+    reporter = _disk_reporter(list(entry_coordinators(entry).values()))
+    if reporter is not None:
+        async_add_devices(
+            [
+                DahuaDiskProblemBinarySensor(reporter, entry, disk["name"])
+                for disk in reporter.get_storage_disks()
+            ],
+            config_subentry_id=reporter.subentry_id,
+        )
+
     for coordinator in entry_coordinators(entry).values():
         sensors: list[BinarySensorEntity] = []
         for event_name in coordinator.get_event_list():
@@ -187,14 +219,6 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_devices):
         # Recognised from a plate, which an indoor monitor without a camera cannot read.
         if not coordinator.is_indoor_monitor_without_video():
             sensors.append(DahuaAuthorizedVehicleBinarySensor(coordinator, entry))
-
-        # One disk-health sensor per physical disk on a recorder. Disabled by
-        # default: it is diagnostic, and the read that feeds it is a logged login,
-        # so only someone who enables it pays for the refresh (#745).
-        for disk in coordinator.get_storage_disks():
-            sensors.append(
-                DahuaDiskProblemBinarySensor(coordinator, entry, disk["name"])
-            )
 
         if sensors:
             async_add_devices(sensors, config_subentry_id=coordinator.subentry_id)
@@ -514,7 +538,16 @@ class DahuaDiskProblemBinarySensor(DahuaBaseEntity, BinarySensorEntity):
         self._disk_name = disk_name
         # /dev/sda -> dev_sda, so the id is stable and slug-shaped.
         slug = disk_name.replace("/", "_").strip("_")
-        self._attr_unique_id = "%s_disk_%s" % (coordinator.get_serial_number(), slug)
+        # The device's serial rather than get_serial_number(), which appends the
+        # channel. A disk belongs to the box, so its identity must not depend on
+        # which channel's coordinator happens to be carrying it -- otherwise
+        # removing channel 0 from a recorder would rename every disk sensor.
+        # On channel 0 the two are the same string, so the ids that existed
+        # before this change and survive it are byte for byte what they were.
+        self._attr_unique_id = "%s_disk_%s" % (
+            coordinator.get_device_serial_number(),
+            slug,
+        )
         self._attr_name = "Disk %s" % disk_name
 
     def _disk(self):
@@ -544,7 +577,7 @@ class DahuaDiskProblemBinarySensor(DahuaBaseEntity, BinarySensorEntity):
         disk = self._disk()
         if disk is None:
             return super().extra_state_attributes
-        return {
+        attributes = {
             **(super().extra_state_attributes or {}),
             "disk": disk["name"],
             "state": disk["state"],
@@ -553,3 +586,21 @@ class DahuaDiskProblemBinarySensor(DahuaBaseEntity, BinarySensorEntity):
             "partition_error": disk["has_error"],
             "health_flag": disk["health_flag"],
         }
+
+        # What the disk is, when RPC2 answered for it. Added only where there is
+        # a value, so a recorder that cannot say does not grow a row of
+        # "unknown" on a diagnostic sensor. `capacity_gb` is the disk itself;
+        # `total_gb` above is what is formatted on it, and the two differ by a
+        # few percent.
+        for key, name in (
+            ("model", "model"),
+            ("serial", "disk_serial"),
+            ("firmware", "disk_firmware"),
+            ("bus", "bus"),
+            ("power_mode", "power_mode"),
+        ):
+            if disk.get(key):
+                attributes[name] = disk[key]
+        if disk.get("capacity_bytes"):
+            attributes["capacity_gb"] = round(disk["capacity_bytes"] / 1_000_000_000, 1)
+        return attributes
