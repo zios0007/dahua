@@ -127,6 +127,27 @@ _HOST_REMOTE_IVS_LOCKS: dict[tuple[str, int], asyncio.Lock] = {}
 # in WhiteMode with nothing to go back to.
 _HOST_LIGHTING_SCHEME_LOCKS: dict[str, asyncio.Lock] = {}
 
+# One clip at a time per speaker, keyed by device and channel.
+_HOST_SPEAKER_LOCKS: dict[tuple, asyncio.Lock] = {}
+
+# Pushing audio to a device's speaker. `singlepart` is a stream rather than an
+# upload: the device plays what arrives as it arrives, sends no status line of
+# any kind, and leaves the socket open. Measured on a VTO2000A, where an
+# unknown action on the same CGI is refused in 0.26s while this one is simply
+# held. So the client owns the rate, decides when the clip has ended, and
+# closes; there is no response to read success from.
+AUDIO_POST_PATH = "/cgi-bin/audio.cgi?action=postAudio&httptype=singlepart&channel={0}"
+
+# How long to listen for an answer that is not expected, after the last byte.
+# Only a device that refuses -- a wrong codec, a busy talk channel -- is
+# expected to say anything at all, and this is how long it is given to.
+AUDIO_REFUSAL_GRACE_SECONDS = 2.0
+
+# How finely the clip is fed to the device. Ten writes a second is small enough
+# that a device consuming in real time is never more than 100ms ahead of its
+# buffer, and coarse enough not to spend a syscall per 100 bytes.
+AUDIO_WRITES_PER_SECOND = 10
+
 
 def _describe_client_error(exception) -> str:
     """The shortest thing that says whether asking again could ever work.
@@ -210,6 +231,27 @@ def _lighting_scheme_lock(device: str) -> asyncio.Lock:
     if lock is None:
         lock = asyncio.Lock()
         _HOST_LIGHTING_SCHEME_LOCKS[device] = lock
+    return lock
+
+
+def _speaker_lock(device: str, channel_number: int) -> asyncio.Lock:
+    """One speaker, so one clip at a time on it.
+
+    Keyed per device *and* channel, which is the scope the hardware has. A
+    doorbell has one of each and the distinction costs it nothing, but a
+    recorder addresses a different camera per channel and each of those has a
+    speaker of its own, so a per-device lock would make eight independent
+    speakers queue behind one another. Scope is the recurring bug in this
+    integration and the cheap direction to be wrong in is the narrow one.
+
+    Per device rather than per address because two boxes behind one IP on
+    different ports are not each other (#1084).
+    """
+    key = (device, channel_number)
+    lock = _HOST_SPEAKER_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _HOST_SPEAKER_LOCKS[key] = lock
     return lock
 
 
@@ -4057,6 +4099,236 @@ class DahuaClient:
     # reboot button did nothing -- both failing as though the request were wrong
     # rather than the transport.
     CONFIG_CGI_ABSENT = (404, 501)
+
+    async def async_play_audio(
+        self,
+        audio: bytes,
+        content_type: str,
+        byte_rate: int,
+        channel_number: int = 1,
+    ) -> None:
+        """Play a clip through the device's own speaker.
+
+        `channel_number` is the device's own numbering, the one that goes on
+        the wire, not the 0-based index the coordinator holds. Spelled out
+        because this integration has got that wrong before: the number is
+        usually index + 1 but some firmware uses the same value for both,
+        which is what `async_device_is_zero_indexed` exists to settle (#724).
+
+        `audio` is already in the device's format, `content_type` names it, and
+        `byte_rate` is how many bytes of it make one second of sound. The
+        caller supplies all three because the right answer differs by device:
+        every published recipe for this uses A-law at 8 kHz, which is 8000
+        bytes a second, while a VTO2000A reports PCM 16-bit at 16 kHz on the
+        same CGI, which is 32000. Guessing here would play one device's audio
+        at a quarter speed.
+
+        **Paced, though the device paces it anyway.** Measured on a VTO2000A
+        with the send buffer pinned to 8 KB: it drained 194,000 bytes in 6.1s,
+        which is 31,683 bytes a second against a playback rate of 32,000. So
+        that device applies the backpressure itself and a client writing flat
+        out would still be held to real time. Pacing stays because a device
+        with a larger buffer would not push back, and #177's reporter heard
+        only the last seconds of a long message, which is what that sounds
+        like.
+
+        **No response to wait for.** `postAudio` sends no status line at all,
+        so finishing the body *is* the end of the clip and the client closes.
+        Only a refusal is expected to say anything, which is what the grace
+        period after the last byte is for -- including the refusal this family
+        of devices gives as HTTP 200 with the body `Error`.
+
+        **Not inside `_request_slot`.** An announcement lasts as long as it
+        lasts, and holding one of this host's two request slots for it would
+        starve the poll of every other channel on the device. That is a trade
+        rather than a freebie: the cap of two is there for the device's sake as
+        much as for fairness (#577, #603), so during an announcement a device
+        sees three connections instead of two. The speaker lock bounds the
+        damage to one announcement at a time.
+        """
+        if byte_rate <= 0:
+            raise ValueError("byte_rate must be a positive number of bytes a second")
+        if not audio:
+            return
+
+        url = self._base + AUDIO_POST_PATH.format(channel_number)
+        duration = len(audio) / byte_rate
+        chunk = max(1, int(byte_rate // AUDIO_WRITES_PER_SECOND))
+
+        # Set once the last byte has been handed to aiohttp. That moment, and
+        # not the response, is what says the clip is over, so it is what the
+        # waiting below is hung on.
+        body_sent = asyncio.Event()
+        # Whether any of it ever left. A device that cannot be reached fails
+        # the wait below as well, and saying it "stopped taking audio" when
+        # nothing was ever sent would point at the wrong problem.
+        body_started = False
+        # Whether the device answered while the clip was still going out. Read
+        # inside the request, where the ordering is unambiguous.
+        answered_early = False
+
+        async def paced_body():
+            """Feeds the clip at the rate it plays at.
+
+            Paced against a single start time rather than by sleeping a fixed
+            slice per write, so a write that blocks does not stretch what
+            follows it: the device hears the clip at its own speed either way.
+            """
+            nonlocal body_started
+            started = time.monotonic()
+            sent = 0
+            try:
+                while sent < len(audio):
+                    piece = audio[sent : sent + chunk]
+                    body_started = True
+                    yield piece
+                    sent += len(piece)
+                    if sent >= len(audio):
+                        # Set on handing over the last piece, not after the
+                        # loop: with Content-Length declared, aiohttp writes
+                        # exactly that many bytes and never asks the generator
+                        # for another, so the code after this loop does not run
+                        # until the generator is closed -- long after the clip
+                        # is out. Waiting for that read as the device having
+                        # answered before the body finished, on every clip.
+                        body_sent.set()
+                        return
+                    behind = (sent / byte_rate) - (time.monotonic() - started)
+                    if behind > 0:
+                        await asyncio.sleep(behind)
+            finally:
+                # The safety net for a send that was abandoned part way: it
+                # releases the waiter rather than leaving it to the timeout.
+                body_sent.set()
+
+        headers = {
+            "Content-Type": content_type,
+            # Explicit, and this is load-bearing. aiohttp sends a body of
+            # unknown size with `Transfer-Encoding: chunked`, and a 2018
+            # embedded web server is not going to de-chunk it, so the device
+            # would play the chunk-length lines as audio. Setting the length
+            # here is what keeps aiohttp from choosing chunked at all.
+            "Content-Length": str(len(audio)),
+        }
+        try:
+            authorization = DigestAuth(
+                self._username, self._password, self._session, self._digest_state
+            ).cached_authorization("POST", url)
+        except aiohttp.ClientError:
+            # A challenge this client cannot build a header from. Send without
+            # one rather than failing: the only audio path measured so far does
+            # not ask for credentials, so an unauthenticated attempt is worth
+            # more than refusing to try.
+            _LOGGER.debug(
+                "Could not reuse %s's digest challenge for audio", self._address
+            )
+            authorization = None
+        if authorization:
+            headers["AUTHORIZATION"] = authorization
+
+        _LOGGER.debug(
+            "Playing %d bytes of %s on %s channel %s, about %.1fs",
+            len(audio),
+            content_type,
+            self._address,
+            channel_number,
+            duration,
+        )
+
+        async def post():
+            nonlocal answered_early
+            async with self._session.post(
+                url,
+                headers=headers,
+                data=paced_body(),
+                # Its own clock. Without this the session default applies,
+                # which is a five minute total, and a long clip would be cut
+                # off mid-play by aiohttp rather than by anything here.
+                timeout=aiohttp.ClientTimeout(
+                    total=duration + TIMEOUT_SECONDS, sock_connect=TIMEOUT_SECONDS
+                ),
+            ) as response:
+                # Read here, at the moment the headers land, rather than from
+                # the outcome of the race below: an answer and the last byte
+                # can both be ready in the same step of the loop, and then
+                # which future "finished first" says nothing about which
+                # actually came first.
+                answered_early = not body_sent.is_set()
+                response.raise_for_status()
+                # A 200 is not consent. This family answers a refused write
+                # with 200 and the body `Error`, which is why every write
+                # through `get()` is checked for it; this one does not go
+                # through `get()`, so it checks for itself.
+                body = await response.text()
+                if write_was_declined(body):
+                    raise DahuaWriteDeclined(
+                        "{0} declined the audio: {1}".format(
+                            self._address, body.strip()[:80]
+                        )
+                    )
+
+        async with _speaker_lock(self._device, channel_number):
+            # Two things are raced, because either can end the call and they
+            # mean opposite things. The post finishing first is the device
+            # answering before the clip is out, which is a refusal however
+            # polite its status code. The body finishing first is the clip
+            # having played, and then a refusal has only the grace period left
+            # to arrive in.
+            #
+            # The send is allowed the clip's own length plus a full
+            # TIMEOUT_SECONDS: a device consuming in real time applies
+            # backpressure, so a paced send legitimately takes about as long as
+            # the clip, and a tighter budget here would cut the tail off.
+            sending = asyncio.ensure_future(post())
+            sent = asyncio.ensure_future(body_sent.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    {sending, sent},
+                    timeout=duration + TIMEOUT_SECONDS,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if sending in done:
+                    # Re-raises a refusal. A 2xx gets here too, and whether
+                    # that is success depends entirely on when it arrived.
+                    await sending
+                    if answered_early:
+                        raise DahuaWriteDeclined(
+                            "{0} answered before the clip had finished, so it "
+                            "played at most part of it".format(self._address)
+                        )
+                    return
+                if not done:
+                    raise asyncio.TimeoutError(
+                        "{0} stopped taking audio part way through".format(
+                            self._address
+                        )
+                        if body_started
+                        else "{0} never started taking the audio".format(self._address)
+                    )
+                done, _ = await asyncio.wait(
+                    {sending}, timeout=AUDIO_REFUSAL_GRACE_SECONDS
+                )
+                if sending in done:
+                    await sending
+                    return
+                _LOGGER.debug(
+                    "%s took the clip without answering, as postAudio does",
+                    self._address,
+                )
+            finally:
+                sent.cancel()
+                if not sending.done():
+                    sending.cancel()
+                # `asyncio.wait` rather than `await sending`, because awaiting
+                # a cancelled task here raises CancelledError and suppressing
+                # that would swallow a cancellation aimed at *this* method: an
+                # enclosing `asyncio.timeout` whose deadline lands during this
+                # cleanup would then never fire. wait() reports rather than
+                # raises, and leaves an outer cancel free to propagate.
+                #
+                # Bounded, so a library that declined to be cancelled could not
+                # hold the speaker lock for ever.
+                await asyncio.wait({sending}, timeout=TIMEOUT_SECONDS)
 
     async def async_access_control_open_door(self, door_id: int = 1) -> dict:
         """Open a door, over CGI, falling back to RPC2 if the CGI path is absent.
