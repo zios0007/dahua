@@ -28,6 +28,7 @@ Reintroduced one at a time against the real source:
 | an empty read overwriting them | `a_refused_read_keeps_the_last_codecs` |
 | the card left alone by the poll | `the_card_goes_when_the_audio_arrives` |
 | the card raise unguarded | `a_card_that_cannot_be_raised_does_not_fail_the_poll` |
+| a partial answer assigned wholesale | `a_partial_answer_keeps_the_fields_it_did_not_mention` |
 """
 
 import pytest
@@ -175,3 +176,101 @@ async def test_a_read_that_raises_still_does_not_fail_the_poll():
 
     assert values == {"table.Encode[0].MainFormat[0].AudioEnable": "true"}
     assert coordinator.get_stream_has_audio(0) is True
+
+
+# --- a partial answer ---------------------------------------------------------
+#
+# ⭐ @rroller on the #997 review, after the whole-channel guard went in: the
+# guard asks "did this answer mention the channel", which is one question
+# short of "did it mention this FIELD of this stream". `parse_stream_codecs`
+# seeds every field it did not see with None, so a reply carrying only
+# `AudioEnable` produces a nonempty record the guard accepts, and assigning it
+# erases a codec the channel really has.
+
+# What a device sends when only the audio flag came back for this stream.
+AUDIO_ONLY = {"table.Encode[0].MainFormat[0].AudioEnable": "false"}
+CODEC_ONLY = {"table.Encode[0].MainFormat[0].Video.Compression": "H.264"}
+
+
+def test_the_parser_really_does_seed_the_missing_field():
+    """The premise, asserted rather than assumed. If this ever stops being
+    true the merge below is solving a problem that has gone away, and the
+    tests after it would pass for the wrong reason."""
+    assert dahua_utils.parse_stream_codecs(AUDIO_ONLY, CHANNEL) == {
+        0: {"codec": None, "audio": False}
+    }
+
+
+async def test_a_partial_answer_keeps_the_fields_it_did_not_mention():
+    """⭐ The reported case: start knowing H.265 with audio off, receive only
+    this channel's `AudioEnable`, and the codec must survive."""
+    coordinator = _coordinator(answers=(AUDIO_ONLY,))
+
+    await coordinator._async_get_encode_config()
+
+    assert coordinator.get_stream_codec(0) == "H.265"
+    assert coordinator.get_stream_has_audio(0) is False
+
+
+async def test_a_partial_answer_does_not_move_the_card():
+    """And the consequence rroller named. Clearing `webrtc_cannot_play` on an
+    answer that said nothing about the codec is deciding on an erasure."""
+    coordinator = _coordinator(answers=(AUDIO_ONLY,))
+
+    await coordinator._async_get_encode_config()
+
+    assert coordinator.cards == [
+        True
+    ], "H.265 and no audio, both still true, so the card stands"
+
+
+async def test_a_partial_answer_still_applies_what_it_did_say():
+    """The merge must not become "ignore partial answers". A codec-only reply
+    is how a channel moved to H.264 on the device is noticed."""
+    coordinator = _coordinator(answers=(CODEC_ONLY,))
+
+    await coordinator._async_get_encode_config()
+
+    assert coordinator.get_stream_codec(0) == "H.264"
+    assert coordinator.get_stream_has_audio(0) is False, "from before, untouched"
+    assert coordinator.cards == [False], "H.264 is playable, so the card goes"
+
+
+async def test_a_stream_the_answer_did_not_mention_is_untouched():
+    """Per stream as well as per field. A reply about the main stream alone
+    must not erase what is known about the sub stream."""
+    coordinator = _coordinator(answers=(AUDIO_ONLY,))
+    coordinator._stream_codecs = dahua_utils.parse_stream_codecs(
+        dict(
+            SILENT,
+            **{
+                "table.Encode[0].ExtraFormat[0].Video.Compression": "H.264",
+                "table.Encode[0].ExtraFormat[0].AudioEnable": "true",
+            },
+        ),
+        CHANNEL,
+    )
+
+    await coordinator._async_get_encode_config()
+
+    assert coordinator.get_stream_codec(1) == "H.264"
+    assert coordinator.get_stream_has_audio(1) is True
+
+
+async def test_a_stream_that_is_new_in_the_answer_is_added():
+    """The other direction: a sub stream that was not there before arrives
+    whole, rather than being dropped for not already being known."""
+    coordinator = _coordinator(
+        answers=(
+            {
+                "table.Encode[0].ExtraFormat[0].Video.Compression": "H.264",
+                "table.Encode[0].ExtraFormat[0].AudioEnable": "true",
+            },
+        )
+    )
+
+    await coordinator._async_get_encode_config()
+
+    assert coordinator.get_stream_codec(1) == "H.264"
+    assert coordinator.get_stream_has_audio(1) is True
+    assert coordinator.get_stream_codec(0) == "H.265", "the main stream is untouched"

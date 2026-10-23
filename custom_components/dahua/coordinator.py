@@ -5553,7 +5553,29 @@ class DahuaDataUpdateCoordinator(DataUpdateCoordinator):
             # the one the audio values already follow, so the two views of the
             # same read stop disagreeing.
             return
-        self._stream_codecs = codecs
+        # ⚠ Merged per FIELD, not assigned per answer, and the guard above is
+        # one question short without this. @rroller on the #997 review: a
+        # reply can carry this channel's `AudioEnable` and no
+        # `Video.Compression`, and `parse_stream_codecs` seeds every field it
+        # did not see with None. That record is nonempty, so the guard accepts
+        # it, and assigning it erases a codec this channel really has. Then
+        # `webrtc_cannot_play` reads a codec of "" and clears the card having
+        # learned nothing about the codec at all.
+        #
+        # None already means "the answer did not say" in the parser, so the
+        # rule falls out of a convention both halves already keep: a field the
+        # answer stated wins, a field it did not keeps what is held, and a
+        # stream it did not mention is untouched. The whole-channel case above
+        # is then the same rule one level up.
+        merged = {
+            index: dict(held) for index, held in (self._stream_codecs or {}).items()
+        }
+        for index, stream in codecs.items():
+            into = merged.setdefault(index, {"codec": None, "audio": None})
+            into.update(
+                {field: value for field, value in stream.items() if value is not None}
+            )
+        self._stream_codecs = merged
         try:
             self._async_report_unplayable_stream()
         except Exception as exception:  # pylint: disable=broad-except
