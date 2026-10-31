@@ -601,6 +601,17 @@ vto_call:
       selector:
         text:
 
+autofocus:
+  name: Autofocus
+  description: >-
+    Asks a camera with a motorized focus lens to refocus without changing zoom.
+    Connect directly to the camera; this command has no recorder channel selector.
+    Cameras without autofocus support may reject the action.
+  target:
+    entity:
+      integration: dahua
+      domain: camera
+
 set_focus_zoom:
   name: Set the Dahua Focus and Zoom
   description: Sets the camera's focus and zoom
